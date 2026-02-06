@@ -1,0 +1,9 @@
+services:
+  iptv-au:
+    container_name: iptv-au
+    image: matthuisman/iptv-au
+    environment:
+      - REGION=all
+    ports:
+      - 8183:80
+    restart: unless-stopped
