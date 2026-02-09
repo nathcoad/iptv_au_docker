@@ -7,6 +7,7 @@ import threading
 import signal
 import logging
 import argparse
+import shutil
 from base64 import b64encode
 from io import BytesIO
 from tempfile import gettempdir
@@ -57,11 +58,30 @@ logging.basicConfig(
 logger = logging.getLogger('iptv_au')
 APP_STARTED_AT = int(time.time())
 
-CACHE_DIR = os.path.join(gettempdir(), 'iptv-au-docker')
+CACHE_DIR_LEGACY = os.path.join(gettempdir(), 'iptv-au-docker')
+DEFAULT_APP_DATA_DIR = '/data/iptv-au-docker' if os.getenv('IS_DOCKER') else CACHE_DIR_LEGACY
+APP_DATA_DIR = os.getenv('APP_DATA_DIR', DEFAULT_APP_DATA_DIR)
+CACHE_DIR = APP_DATA_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
-logger.info('Cache dir: %s', CACHE_DIR)
+logger.info('App data dir: %s', CACHE_DIR)
 cache = SimpleCache()
-NINENOW_AUTH_STATE_PATH = os.path.join(CACHE_DIR, '9now_auth.json')
+NINENOW_AUTH_STATE_PATH = os.getenv('NINENOW_AUTH_STATE_PATH', os.path.join(CACHE_DIR, '9now_auth.json'))
+NINENOW_AUTH_STATE_DIR = os.path.dirname(NINENOW_AUTH_STATE_PATH)
+if NINENOW_AUTH_STATE_DIR:
+    os.makedirs(NINENOW_AUTH_STATE_DIR, exist_ok=True)
+logger.info('9Now auth state path: %s', NINENOW_AUTH_STATE_PATH)
+
+legacy_auth_state_path = os.path.join(CACHE_DIR_LEGACY, '9now_auth.json')
+if (
+    NINENOW_AUTH_STATE_PATH != legacy_auth_state_path
+    and not os.path.exists(NINENOW_AUTH_STATE_PATH)
+    and os.path.exists(legacy_auth_state_path)
+):
+    try:
+        shutil.copy2(legacy_auth_state_path, NINENOW_AUTH_STATE_PATH)
+        logger.info('Migrated legacy 9Now auth state from %s to %s', legacy_auth_state_path, NINENOW_AUTH_STATE_PATH)
+    except Exception:
+        logger.exception('Failed to migrate legacy 9Now auth state from %s', legacy_auth_state_path)
 
 
 def is_valid_url(url):
@@ -464,6 +484,22 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return 'N/A'
 
+    @staticmethod
+    def _format_minutes_until(timestamp, now_timestamp=None):
+        if not timestamp:
+            return 'N/A'
+
+        try:
+            now_value = int(now_timestamp if now_timestamp is not None else time.time())
+            delta = int(timestamp) - now_value
+            if delta <= 0:
+                return 'due now'
+
+            minutes = max(1, (delta + 59) // 60)
+            return 'in {} minute{}'.format(minutes, '' if minutes == 1 else 's')
+        except Exception:
+            return 'N/A'
+
     def do_GET(self):
         # Serve the favicon.ico file
         if self.path == '/favicon.ico':
@@ -587,9 +623,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         auth_status = ninenow_auth.status()
+        server_time = int(time.time())
         login_text = 'Logged in' if auth_status['logged_in'] else 'Not logged in'
         token_expiry = self._format_timestamp(auth_status.get('token_expires'))
         next_refresh = self._format_timestamp(auth_status.get('next_auto_refresh_at'))
+        next_refresh_relative = self._format_minutes_until(auth_status.get('next_auto_refresh_at'), server_time)
         auto_checked = 'checked' if auth_status.get('auto_refresh_enabled') else ''
         auto_interval = int(auth_status.get('auto_refresh_interval_minutes', NINENOW_DEFAULT_AUTO_REFRESH_INTERVAL_MINUTES))
 
@@ -683,13 +721,18 @@ class Handler(BaseHTTPRequestHandler):
         <h1>9Now Authentication</h1>
         <p>Status: <strong id="login-status">{login_text}</strong></p>
         <p>Token expires: <strong id="token-expiry">{token_expiry}</strong></p>
-        <p>Next auto refresh: <strong id="next-refresh">{next_refresh}</strong></p>
+        <p>
+            Next auto refresh:
+            <strong id="next-refresh-relative">{next_refresh_relative}</strong>
+            <span id="next-refresh" style="color: #4d596a;">({next_refresh})</span>
+        </p>
 
         <div class="actions">
             <button onclick="startLogin()">Start Device Login</button>
             <button class="secondary" onclick="pollLogin(true)">Poll Login Now</button>
             <button class="secondary" onclick="refreshNow()">Refresh Token Now</button>
             <button class="secondary" onclick="logoutNow()">Logout</button>
+            <button class="secondary" onclick="window.location.href='/'">Back to Dashboard</button>
         </div>
 
         <div id="login-details">
@@ -738,12 +781,27 @@ class Handler(BaseHTTPRequestHandler):
             return date.toLocaleString();
         }}
 
+        function formatMinutesUntil(nextTs, serverTs) {{
+            if (!nextTs || !serverTs) {{
+                return 'N/A';
+            }}
+
+            const delta = Number(nextTs) - Number(serverTs);
+            if (delta <= 0) {{
+                return 'due now';
+            }}
+
+            const minutes = Math.ceil(delta / 60);
+            return 'in ' + minutes + ' minute' + (minutes === 1 ? '' : 's');
+        }}
+
         async function refreshStatus() {{
             const response = await fetch('/{auth_path}');
             const data = await response.json();
             document.getElementById('login-status').innerText = data.logged_in ? 'Logged in' : 'Not logged in';
             document.getElementById('token-expiry').innerText = formatTimestamp(data.token_expires);
-            document.getElementById('next-refresh').innerText = formatTimestamp(data.next_auto_refresh_at);
+            document.getElementById('next-refresh-relative').innerText = formatMinutesUntil(data.next_auto_refresh_at, data.server_time);
+            document.getElementById('next-refresh').innerText = '(' + formatTimestamp(data.next_auto_refresh_at) + ')';
             document.getElementById('auto-enabled').checked = !!data.auto_refresh_enabled;
             document.getElementById('auto-interval').value = data.auto_refresh_interval_minutes;
         }}
@@ -849,6 +907,7 @@ class Handler(BaseHTTPRequestHandler):
             login_text=login_text,
             token_expiry=token_expiry,
             next_refresh=next_refresh,
+            next_refresh_relative=next_refresh_relative,
             auto_checked=auto_checked,
             auto_interval=auto_interval,
             activate_url=NINENOW_ACTIVATE_URL,
@@ -1064,7 +1123,6 @@ class Handler(BaseHTTPRequestHandler):
         cache.set(url, cache_path, timeout=CACHE_TIME)
 
     def _status(self):
-        # Generate HTML content with the favicon link
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
@@ -1072,30 +1130,182 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get('Host')
         auth_status = ninenow_auth.status()
         auth_text = 'Logged in' if auth_status['logged_in'] else 'Not logged in'
+        auth_class = 'ok' if auth_status['logged_in'] else 'warn'
         auto_enabled = 'Enabled' if auth_status.get('auto_refresh_enabled') else 'Disabled'
         auto_interval = int(auth_status.get('auto_refresh_interval_minutes', NINENOW_DEFAULT_AUTO_REFRESH_INTERVAL_MINUTES))
         auto_next = self._format_timestamp(auth_status.get('next_auto_refresh_at'))
-        self.wfile.write(f'''
-            <html>
-            <head>
-                <title>IPTV AU for Docker</title>
-                <link rel="icon" href="/favicon.ico" type="image/x-icon">
-            </head>
-            <body>
-                Playlist URL: <b><a href="http://{host}/{PLAYLIST_PATH}">http://{host}/{PLAYLIST_PATH}</a></b><br>
-                EPG URL (Set to refresh once per hour): <b><a href="http://{host}/{EPG_PATH}">http://{host}/{EPG_PATH}</a></b><br><br>
-                Healthcheck URL: <b><a href="http://{host}/{HEALTH_PATH}">http://{host}/{HEALTH_PATH}</a></b><br><br>
-                9Now Login Status: <b>{auth_text}</b><br>
-                9Now Login UI: <a href="http://{host}/{NINENOW_UI_PATH}">http://{host}/{NINENOW_UI_PATH}</a><br>
-                9Now Auto Refresh: <b>{auto_enabled}</b> every <b>{auto_interval}</b> minutes (next: <b>{auto_next}</b>)<br>
-                9Now Auth Status JSON: <a href="http://{host}/{NINENOW_AUTH_STATUS_PATH}">http://{host}/{NINENOW_AUTH_STATUS_PATH}</a><br>
-                Start 9Now Device Login: <a href="http://{host}/{NINENOW_LOGIN_PATH}">http://{host}/{NINENOW_LOGIN_PATH}</a><br>
-                Poll 9Now Device Login: <code>http://{host}/{NINENOW_LOGIN_POLL_PATH}?auth_code=...&device_code=...</code><br>
-                9Now Manual Refresh: <a href="http://{host}/{NINENOW_REFRESH_PATH}">http://{host}/{NINENOW_REFRESH_PATH}</a><br>
-                9Now Logout: <a href="http://{host}/{NINENOW_LOGOUT_PATH}">http://{host}/{NINENOW_LOGOUT_PATH}</a><br>
-            </body>
-            </html>
-        '''.encode('utf8'))
+        auto_next_relative = self._format_minutes_until(auth_status.get('next_auto_refresh_at'))
+        token_expires = self._format_timestamp(auth_status.get('token_expires'))
+
+        base_url = 'http://{}'.format(host)
+        playlist_url = '{}/{}'.format(base_url, PLAYLIST_PATH)
+        epg_url = '{}/{}'.format(base_url, EPG_PATH)
+        health_url = '{}/{}'.format(base_url, HEALTH_PATH)
+        ninenow_ui_url = '{}/{}'.format(base_url, NINENOW_UI_PATH)
+        ninenow_auth_url = '{}/{}'.format(base_url, NINENOW_AUTH_STATUS_PATH)
+        ninenow_login_url = '{}/{}'.format(base_url, NINENOW_LOGIN_PATH)
+        ninenow_refresh_url = '{}/{}'.format(base_url, NINENOW_REFRESH_PATH)
+        ninenow_logout_url = '{}/{}'.format(base_url, NINENOW_LOGOUT_PATH)
+        ninenow_poll_url = '{}/{}?auth_code=...&device_code=...'.format(base_url, NINENOW_LOGIN_POLL_PATH)
+
+        html = '''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IPTV AU Dashboard</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: linear-gradient(135deg, #e8f1ff 0%, #f7fbff 40%, #ffffff 100%);
+            color: #132036;
+            padding: 24px;
+        }}
+        .shell {{
+            max-width: 980px;
+            margin: 0 auto;
+        }}
+        .hero {{
+            background: #0f2b4d;
+            color: #f7fbff;
+            border-radius: 14px;
+            padding: 20px 22px;
+            box-shadow: 0 14px 28px rgba(15, 43, 77, 0.24);
+        }}
+        .hero h1 {{
+            margin: 0 0 8px 0;
+            font-size: 28px;
+        }}
+        .hero p {{
+            margin: 0;
+            color: #c8daef;
+        }}
+        .grid {{
+            margin-top: 16px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 14px;
+        }}
+        .card {{
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(16, 38, 65, 0.10);
+            padding: 16px;
+        }}
+        .card h2 {{
+            margin: 0 0 10px 0;
+            font-size: 18px;
+        }}
+        .row {{
+            margin: 8px 0;
+        }}
+        .pill {{
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 700;
+        }}
+        .pill.ok {{
+            background: #e6f7ef;
+            color: #0f6848;
+        }}
+        .pill.warn {{
+            background: #fff1ec;
+            color: #9a391d;
+        }}
+        .links {{
+            margin-top: 10px;
+            display: grid;
+            gap: 8px;
+        }}
+        .links a {{
+            display: block;
+            color: #0058cc;
+            text-decoration: none;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #f2f7ff;
+            border: 1px solid #d9e8ff;
+        }}
+        .links a:hover {{
+            background: #e8f1ff;
+        }}
+        code {{
+            display: block;
+            margin-top: 10px;
+            background: #eef3fb;
+            border-radius: 8px;
+            padding: 8px 10px;
+            overflow-wrap: anywhere;
+        }}
+        .muted {{
+            color: #4d596a;
+            font-size: 14px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <div class="hero">
+            <h1>IPTV AU Dashboard</h1>
+            <p>Core stream endpoints and 9Now authentication controls.</p>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Core Endpoints</h2>
+                <div class="row"><strong>Playlist</strong> and <strong>EPG</strong> links for your client configuration.</div>
+                <div class="links">
+                    <a href="{playlist_url}">Playlist M3U: {playlist_url}</a>
+                    <a href="{epg_url}">EPG XML: {epg_url}</a>
+                    <a href="{health_url}">Healthcheck JSON: {health_url}</a>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>9Now Auth Status</h2>
+                <div class="row">
+                    Status: <span class="pill {auth_class}">{auth_text}</span>
+                </div>
+                <div class="row">Token expires: <strong>{token_expires}</strong></div>
+                <div class="row">Auto refresh: <strong>{auto_enabled}</strong> every <strong>{auto_interval} minutes</strong></div>
+                <div class="row">Next refresh: <strong>{auto_next_relative}</strong> <span class="muted">({auto_next})</span></div>
+                <div class="links">
+                    <a href="{ninenow_ui_url}">Open 9Now Authentication UI</a>
+                    <a href="{ninenow_auth_url}">9Now Auth Status JSON</a>
+                    <a href="{ninenow_login_url}">Start 9Now Device Login</a>
+                    <a href="{ninenow_refresh_url}">Manual Token Refresh</a>
+                    <a href="{ninenow_logout_url}">Logout 9Now</a>
+                </div>
+                <code>{ninenow_poll_url}</code>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+        '''.format(
+            playlist_url=playlist_url,
+            epg_url=epg_url,
+            health_url=health_url,
+            auth_class=auth_class,
+            auth_text=auth_text,
+            token_expires=token_expires,
+            auto_enabled=auto_enabled,
+            auto_interval=auto_interval,
+            auto_next_relative=auto_next_relative,
+            auto_next=auto_next,
+            ninenow_ui_url=ninenow_ui_url,
+            ninenow_auth_url=ninenow_auth_url,
+            ninenow_login_url=ninenow_login_url,
+            ninenow_refresh_url=ninenow_refresh_url,
+            ninenow_logout_url=ninenow_logout_url,
+            ninenow_poll_url=ninenow_poll_url,
+        )
+        self.wfile.write(html.encode('utf8'))
 
 
 class ThreadingSimpleServer(ThreadingMixIn, HTTPServer):

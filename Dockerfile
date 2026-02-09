@@ -9,7 +9,7 @@ COPY . .
 
 EXPOSE 80/tcp
 
-ENV IS_DOCKER=1
+ENV IS_DOCKER=1 APP_DATA_DIR=/data/iptv-au-docker
 STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

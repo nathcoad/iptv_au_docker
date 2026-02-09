@@ -4,6 +4,12 @@ services:
     image: matthuisman/iptv-au
     environment:
       - REGION=all
+      - APP_DATA_DIR=/data/iptv-au-docker
     ports:
       - 8183:80
+    volumes:
+      - iptv-au-data:/data
     restart: unless-stopped
+
+volumes:
+  iptv-au-data:

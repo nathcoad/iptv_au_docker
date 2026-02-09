@@ -40,6 +40,13 @@ This project now includes local 9Now device login and token refresh logic (porte
   - closes the HTTP server cleanly
   - stops the background 9Now auto-refresh worker
 
+### Keep 9Now Login Across Container Restart/Recreate
+
+- 9Now auth tokens are stored in `9now_auth.json` under `APP_DATA_DIR`.
+- In Docker, default `APP_DATA_DIR` is `/data/iptv-au-docker`.
+- To persist login across container recreate/update, mount a persistent volume to `/data`.
+- The included `docker-compose.yml` now mounts a named volume (`iptv-au-data`) for this.
+
 ### Environment Variables
 
 - `NINENOW_AUTO_REFRESH_ENABLED` default: `1` (`0` to disable)
@@ -47,4 +54,6 @@ This project now includes local 9Now device login and token refresh logic (porte
 - `LOG_LEVEL` default: `INFO`
   - Common values: `DEBUG`, `INFO`, `WARNING`, `ERROR`
   - Use `DEBUG` to see detailed 9Now login/refresh lifecycle logs
+- `APP_DATA_DIR` default: `/data/iptv-au-docker` in Docker, otherwise temp directory
+- `NINENOW_AUTH_STATE_PATH` optional full path override for token state file
 - `REGION` default: `all`
