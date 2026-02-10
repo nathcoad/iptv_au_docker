@@ -2,6 +2,20 @@
 
 https://www.matthuisman.nz/....
 
+## Beginner Setup: Build and Run with Docker Compose
+
+1. Build the Docker image from this repo:
+   - `docker build -t iptv-au-local:latest .`
+2. In `docker-compose.yml`, set the service image to your local image:
+   - `image: iptv-au-local:latest`
+3. Start the container:
+   - `docker compose up -d`
+4. Open the dashboard:
+   - `http://localhost:8183/`
+5. Use these client URLs:
+   - Playlist: `http://localhost:8183/playlist.m3u8`
+   - EPG: `http://localhost:8183/epg.xml`
+
 ## 9Now Login and Token Refresh
 
 This project now includes local 9Now device login and token refresh logic (ported from `slyguy.9now`) directly in `app.py`.
@@ -49,6 +63,9 @@ This project now includes local 9Now device login and token refresh logic (porte
 
 ### Environment Variables
 
+- `PLAYLIST_FORMAT` default: `kodi`
+  - `kodi`: appends channel headers to stream URLs using Kodi/TiVi Mate style (`|user-agent=...&referer=...`)
+  - `raw`: keeps the original stream URL output
 - `NINENOW_AUTO_REFRESH_ENABLED` default: `1` (`0` to disable)
 - `NINENOW_AUTO_REFRESH_INTERVAL_MINUTES` default: `60`
 - `LOG_LEVEL` default: `INFO`

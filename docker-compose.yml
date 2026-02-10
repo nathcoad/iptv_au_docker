@@ -5,6 +5,7 @@ services:
     environment:
       - REGION=all
       - APP_DATA_DIR=/data/iptv-au-docker
+      - PLAYLIST_FORMAT=kodi # set to raw for legacy/original stream URL output
     ports:
       - 8183:80
     volumes:

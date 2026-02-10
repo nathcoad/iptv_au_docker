@@ -14,7 +14,7 @@ from tempfile import gettempdir
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from base64 import b64decode
-from urllib.parse import urlparse, parse_qsl, urlencode, unquote, parse_qs
+from urllib.parse import urlparse, parse_qsl, urlencode, unquote, parse_qs, quote
 
 import requests
 from cachelib import SimpleCache
@@ -49,6 +49,13 @@ NINENOW_DEFAULT_AUTO_REFRESH_INTERVAL_MINUTES = max(1, int(os.getenv('NINENOW_AU
 NINENOW_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
 }
+PLAYLIST_FORMAT_RAW = 'raw'
+PLAYLIST_FORMAT_KODI = 'kodi'
+PLAYLIST_ALLOWED_FORMATS = (PLAYLIST_FORMAT_RAW, PLAYLIST_FORMAT_KODI)
+PLAYLIST_DEFAULT_FORMAT = PLAYLIST_FORMAT_KODI
+PLAYLIST_FORMAT_CONFIGURED = os.getenv('PLAYLIST_FORMAT', PLAYLIST_DEFAULT_FORMAT).strip().lower()
+PLAYLIST_FORMAT = PLAYLIST_FORMAT_CONFIGURED if PLAYLIST_FORMAT_CONFIGURED in PLAYLIST_ALLOWED_FORMATS else PLAYLIST_DEFAULT_FORMAT
+PLAYLIST_HEADER_KEYS = ('user-agent', 'referer')
 LOG_LEVEL_NAME = os.getenv('LOG_LEVEL', 'INFO').strip().upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(
@@ -57,6 +64,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger('iptv_au')
 APP_STARTED_AT = int(time.time())
+if PLAYLIST_FORMAT != PLAYLIST_FORMAT_CONFIGURED:
+    logger.warning(
+        'Invalid PLAYLIST_FORMAT=%s; falling back to %s',
+        PLAYLIST_FORMAT_CONFIGURED,
+        PLAYLIST_DEFAULT_FORMAT,
+    )
 
 CACHE_DIR_LEGACY = os.path.join(gettempdir(), 'iptv-au-docker')
 DEFAULT_APP_DATA_DIR = '/data/iptv-au-docker' if os.getenv('IS_DOCKER') else CACHE_DIR_LEGACY
@@ -499,6 +512,31 @@ class Handler(BaseHTTPRequestHandler):
             return 'in {} minute{}'.format(minutes, '' if minutes == 1 else 's')
         except Exception:
             return 'N/A'
+
+    @staticmethod
+    def _playlist_headers(channel):
+        headers = {}
+        for header_name, header_value in channel.get('headers', {}).items():
+            key = str(header_name).strip().lower()
+            if key not in PLAYLIST_HEADER_KEYS:
+                continue
+
+            value = str(header_value)
+            if value:
+                headers[key] = value
+        return headers
+
+    @staticmethod
+    def _playlist_url(url, channel):
+        if PLAYLIST_FORMAT != PLAYLIST_FORMAT_KODI or '|' in url:
+            return url
+
+        headers = Handler._playlist_headers(channel)
+        if not headers:
+            return url
+
+        # Kodi/TiVi Mate-style stream headers are appended after a pipe.
+        return '{}|{}'.format(url, urlencode(headers, quote_via=quote))
 
     def do_GET(self):
         # Serve the favicon.ico file
@@ -1055,12 +1093,12 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get('Host')
 
         self.wfile.write(b'#EXTM3U\n')
-        for key in sorted(channels.keys(), key=lambda x: channels[x].get('chno', 9999999) if sort == 'chno' else channels[x]['name'].strip().lower()):
-            channel = channels[key]
+        for slug in sorted(channels.keys(), key=lambda x: channels[x].get('chno', 9999999) if sort == 'chno' else channels[x]['name'].strip().lower()):
+            channel = channels[slug]
             logo = channel['logo']
             name = channel['name']
             url = channel['mjh_master']
-            channel_id = f'iptv-au-{key}'
+            channel_id = f'iptv-au-{slug}'
 
             if url.lower().startswith('plugin://slyguy.9now/'):
                 url = f"http://{host}/{DEEPLINK_PATH}/{url}"
@@ -1083,8 +1121,10 @@ class Handler(BaseHTTPRequestHandler):
             elif channel.get('chno') is not None:
                 chno = ' tvg-chno="{}"'.format(channel['chno'])
 
+            playlist_url = self._playlist_url(url, channel)
+
             # Write channel information
-            self.wfile.write(f'#EXTINF:-1 channel-id="{channel_id}" tvg-id="{key}" tvg-logo="{logo}"{chno},{name}\n{url}\n'.encode('utf8'))
+            self.wfile.write(f'#EXTINF:-1 channel-id="{channel_id}" tvg-id="{slug}" tvg-logo="{logo}"{chno},{name}\n{playlist_url}\n'.encode('utf8'))
 
     def _epg(self):
         url = EPG_URL.format(region=REGION)
@@ -1323,8 +1363,14 @@ def run():
         args = parser.parse_args()
         PORT = args.PORT
 
-    logger.info('Starting server on port %s (region=%s, auto_refresh_default_enabled=%s, auto_refresh_default_interval_minutes=%s)',
-                PORT, REGION, NINENOW_DEFAULT_AUTO_REFRESH_ENABLED, NINENOW_DEFAULT_AUTO_REFRESH_INTERVAL_MINUTES)
+    logger.info(
+        'Starting server on port %s (region=%s, playlist_format=%s, auto_refresh_default_enabled=%s, auto_refresh_default_interval_minutes=%s)',
+        PORT,
+        REGION,
+        PLAYLIST_FORMAT,
+        NINENOW_DEFAULT_AUTO_REFRESH_ENABLED,
+        NINENOW_DEFAULT_AUTO_REFRESH_INTERVAL_MINUTES,
+    )
     server = ThreadingSimpleServer(('0.0.0.0', int(PORT)), Handler)
     shutdown_requested = threading.Event()
 
