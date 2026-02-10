@@ -64,7 +64,8 @@ This project now includes local 9Now device login and token refresh logic (porte
 ### Environment Variables
 
 - `PLAYLIST_FORMAT` default: `kodi`
-  - `kodi`: appends channel headers to stream URLs using Kodi/TiVi Mate style (`|user-agent=...&referer=...`)
+  - `kodi`: writes channel headers as Kodi/TiVi Mate `#EXTVLCOPT:http-...` lines between `#EXTINF` and stream URL
+    - Players that do not support `#EXTVLCOPT` can ignore these lines because they are comments (`#`)
   - `raw`: keeps the original stream URL output
 - `NINENOW_AUTO_REFRESH_ENABLED` default: `1` (`0` to disable)
 - `NINENOW_AUTO_REFRESH_INTERVAL_MINUTES` default: `60`

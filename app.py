@@ -14,7 +14,7 @@ from tempfile import gettempdir
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from base64 import b64decode
-from urllib.parse import urlparse, parse_qsl, urlencode, unquote, parse_qs, quote
+from urllib.parse import urlparse, parse_qsl, urlencode, unquote, parse_qs
 
 import requests
 from cachelib import SimpleCache
@@ -55,7 +55,7 @@ PLAYLIST_ALLOWED_FORMATS = (PLAYLIST_FORMAT_RAW, PLAYLIST_FORMAT_KODI)
 PLAYLIST_DEFAULT_FORMAT = PLAYLIST_FORMAT_KODI
 PLAYLIST_FORMAT_CONFIGURED = os.getenv('PLAYLIST_FORMAT', PLAYLIST_DEFAULT_FORMAT).strip().lower()
 PLAYLIST_FORMAT = PLAYLIST_FORMAT_CONFIGURED if PLAYLIST_FORMAT_CONFIGURED in PLAYLIST_ALLOWED_FORMATS else PLAYLIST_DEFAULT_FORMAT
-PLAYLIST_HEADER_KEYS = ('user-agent', 'referer')
+PLAYLIST_HEADER_KEYS = ('referer', 'user-agent')
 LOG_LEVEL_NAME = os.getenv('LOG_LEVEL', 'INFO').strip().upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(
@@ -527,16 +527,25 @@ class Handler(BaseHTTPRequestHandler):
         return headers
 
     @staticmethod
-    def _playlist_url(url, channel):
-        if PLAYLIST_FORMAT != PLAYLIST_FORMAT_KODI or '|' in url:
-            return url
+    def _playlist_kodi_tags(channel):
+        if PLAYLIST_FORMAT != PLAYLIST_FORMAT_KODI:
+            return []
 
         headers = Handler._playlist_headers(channel)
         if not headers:
-            return url
+            return []
 
-        # Kodi/TiVi Mate-style stream headers are appended after a pipe.
-        return '{}|{}'.format(url, urlencode(headers, quote_via=quote))
+        tags = []
+        for header_name in PLAYLIST_HEADER_KEYS:
+            header_value = headers.get(header_name)
+            if header_value is None:
+                continue
+
+            if header_value.startswith(' '):
+                header_value = '%20{}'.format(header_value)
+
+            tags.append('#EXTVLCOPT:http-{}={}'.format(header_name, header_value))
+        return tags
 
     def do_GET(self):
         # Serve the favicon.ico file
@@ -1121,10 +1130,14 @@ class Handler(BaseHTTPRequestHandler):
             elif channel.get('chno') is not None:
                 chno = ' tvg-chno="{}"'.format(channel['chno'])
 
-            playlist_url = self._playlist_url(url, channel)
+            playlist_lines = [
+                f'#EXTINF:-1 channel-id="{channel_id}" tvg-id="{slug}" tvg-logo="{logo}"{chno},{name}',
+            ]
+            playlist_lines.extend(self._playlist_kodi_tags(channel))
+            playlist_lines.append(url)
 
             # Write channel information
-            self.wfile.write(f'#EXTINF:-1 channel-id="{channel_id}" tvg-id="{slug}" tvg-logo="{logo}"{chno},{name}\n{playlist_url}\n'.encode('utf8'))
+            self.wfile.write('{}\n'.format('\n'.join(playlist_lines)).encode('utf8'))
 
     def _epg(self):
         url = EPG_URL.format(region=REGION)
